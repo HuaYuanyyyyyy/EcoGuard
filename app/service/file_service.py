@@ -9,7 +9,17 @@ from app.core.chroma import get_chroma
 import tempfile
 import os
 
-def upload_pdf(file_name: str, file_data: bytes, db: Session):  
+def upload_pdf(file_name: str, file_data: bytes, db: Session): 
+
+    # 检查是否已存在同名文件，存在则先删除
+    existing = db.query(File).filter(
+        File.file_name == file_name,
+        File.status == "active"
+    ).first()
+    
+    if existing:
+        delete_pdf(existing.id, db)
+
     file_id = str(uuid.uuid4())
     file_size = len(file_data)
     minio_path = None
