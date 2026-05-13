@@ -9,53 +9,70 @@ from app.core.chroma import get_chroma
 import tempfile
 import os
 
-def upload_pdf(file_name: str, file_data: bytes, db: Session):
+def upload_pdf(file_name: str, file_data: bytes, db: Session):  
     file_id = str(uuid.uuid4())
     file_size = len(file_data)
-
-    # 1. 存MinIO
-    minio_path = upload_file(
-        file_id=file_id,
-        file_name=file_name,
-        file_data=io.BytesIO(file_data),
-        file_size=file_size
-    )
-
-    # 2. 解析PDF切块存Chroma
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file_data)
-        tmp_path = tmp.name
+    minio_path = None
+    chroma_ids = None
 
     try:
-        loader = PyPDFLoader(tmp_path)
-        docs = loader.load()
-
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50
+        # 1. 存MinIO
+        minio_path = upload_file(
+            file_id=file_id,
+            file_name=file_name,
+            file_data=io.BytesIO(file_data),
+            file_size=file_size
         )
-        chunks = splitter.split_documents(docs)
 
-        for chunk in chunks:
-            chunk.metadata["file_id"] = file_id
-            chunk.metadata["file_name"] = file_name
+        # 2. 解析PDF切块存Chroma
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file_data)
+            tmp_path = tmp.name
 
-        chroma = get_chroma()
-        chroma.add_documents(chunks)
-    finally:
-        os.unlink(tmp_path)
+        try:
+            loader = PyPDFLoader(tmp_path)
+            docs = loader.load()
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,
+                chunk_overlap=50
+            )
+            chunks = splitter.split_documents(docs)
+            for chunk in chunks:
+                chunk.metadata["file_id"] = file_id
+                chunk.metadata["file_name"] = file_name
 
-    # 3. 存MySQL
-    file_record = File(
-        id=file_id,
-        file_name=file_name,
-        minio_path=minio_path,
-        file_size=file_size
-    )
-    db.add(file_record)
-    db.commit()
+            chroma = get_chroma()
+            chroma_ids = chroma.add_documents(chunks)
+        finally:
+            os.unlink(tmp_path)
 
-    return file_record
+        # 3. 存MySQL
+        file_record = File(
+            id=file_id,
+            file_name=file_name,
+            minio_path=minio_path,
+            file_size=file_size
+        )
+        db.add(file_record)
+        db.commit()
+
+        return file_record
+
+    except Exception as e:
+        # 回滚：哪步成功了就回滚哪步
+        if minio_path:
+            try:
+                delete_file(minio_path)
+            except:
+                pass
+        if chroma_ids:
+            try:
+                chroma = get_chroma()
+                chroma.delete(ids=chroma_ids)
+            except:
+                pass
+        db.rollback()
+        raise e
 
 
 def delete_pdf(file_id: str, db: Session):
