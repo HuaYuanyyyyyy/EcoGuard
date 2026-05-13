@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str
     MINIO_BUCKET: str
     CHROMA_DIR: str
+    DATABASE_URL: str
 
     class Config:
         env_file = ".env"
