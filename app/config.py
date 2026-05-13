@@ -2,7 +2,8 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     API_KEY: str
-    BASE_URL: str
+    LLM_BASE_URL: str
+    EMBEDDING_BASE_URL: str
     LLM_MODEL: str
     EMBEDDING_MODEL: str
     MINIO_ENDPOINT: str

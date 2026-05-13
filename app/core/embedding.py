@@ -8,7 +8,7 @@ class MyEmbeddings(Embeddings):
     def __init__(self):
         self.client = OpenAI(
             api_key=settings.API_KEY,
-            base_url=settings.BASE_URL
+            base_url=settings.EMBEDDING_BASE_URL
         )
         self.model = settings.EMBEDDING_MODEL
 
