@@ -50,6 +50,12 @@ EcoGuard/
 │   │   ├── file_service.py    # 文件业务逻辑
 │   │   ├── rag_service.py     # 检索+问答逻辑
 │   │   └── minio_service.py   # MinIO操作
+│   ├── prompts/
+│   │   ├── __init__.py
+│   │   ├── intent.py       # 意图识别提示词
+│   │   ├── compliance.py   # 合规判断提示词
+│   │   ├── summary.py      # 自然语言总结提示词
+│   │   └── system.py       # 系统角色提示词
 │   ├── model/
 │   │   └── file.py        # 数据库模型
 │   ├── core/
