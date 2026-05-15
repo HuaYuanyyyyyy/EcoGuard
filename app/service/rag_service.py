@@ -9,6 +9,7 @@ from app.prompts.intent import INTENT_PROMPT
 from app.prompts.compliance import COMPLIANCE_PROMPT
 from app.prompts.summary import SUMMARY_PROMPT
 from app.prompts.system import SYSTEM_PROMPT
+from typing import AsyncGenerator
 
 llm = ChatOpenAI(
     api_key=settings.API_KEY,
@@ -102,3 +103,39 @@ def normal_chat(user_input: str) -> str:
         HumanMessage(content=user_input)
     ])
     return response.content
+
+
+
+async def stream_check_compliance(user_input: str) -> AsyncGenerator[str, None]:
+    chroma = get_chroma()
+    items = parse_pollution_data(user_input)
+
+    results = []
+
+    # 每个污染物检测完立刻发出，不等其他的
+    tasks = [check_single_item(item, chroma) for item in items]
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        results.append(result)
+        # 立刻推给前端
+        yield f"data: {json.dumps({'type': 'result_item', 'item': result}, ensure_ascii=False)}\n\n"
+
+    # 所有检测完后流式输出总结
+    template = PromptTemplate.from_template(SUMMARY_PROMPT)
+    prompt = template.format(results=json.dumps(results, ensure_ascii=False))
+
+    async for chunk in llm.astream([HumanMessage(content=prompt)]):
+        if chunk.content:
+            yield f"data: {json.dumps({'type': 'summary_chunk', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+async def stream_normal_chat(user_input: str) -> AsyncGenerator[str, None]:
+    async for chunk in llm.astream([
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=user_input)
+    ]):
+        if chunk.content:
+            yield f"data: {json.dumps({'type': 'chat_chunk', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"    

@@ -152,32 +152,69 @@ const sendMessage = async () => {
   const text = inputText.value.trim()
   if (!text || loading.value) return
 
-  // 添加用户消息
   messages.value.push({ role: 'user', content: text })
   inputText.value = ''
   loading.value = true
   await scrollToBottom()
 
-  try {
-    const res = await chatApi.query(text)
-    const data = res.data
+  // 先占位
+  messages.value.push({ role: 'ai', type: 'pending', content: '' })
+  const msgIndex = messages.value.length - 1
 
-    if (data.type === 'compliance') {
-      messages.value.push({
-        role: 'ai',
-        type: 'compliance',
-        results: data.results,
-        summary: data.summary
-      })
-    } else {
-      messages.value.push({
-        role: 'ai',
-        type: 'chat',
-        content: data.content
-      })
+  try {
+    const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const response = await fetch(`${baseURL}/chat/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    })
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value)
+      const lines = chunk.split('\n')
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.type === 'result_item') {
+              // 第一条结果来了，初始化消息
+            if (messages.value[msgIndex].type === 'pending') {
+               messages.value[msgIndex] = {
+               role: 'ai',
+               type: 'compliance',
+               results: [],
+               summary: ''
+              }
+            }
+  // 每来一条追加一行
+          messages.value[msgIndex].results.push(data.item)
+          }
+          else if (data.type === 'summary_chunk') {
+            // 总结流式追加
+            messages.value[msgIndex].summary += data.content
+          } else if (data.type === 'chat_chunk') {
+            // 普通对话流式追加
+            if (messages.value[msgIndex].type === 'pending') {
+              messages.value[msgIndex] = { role: 'ai', type: 'chat', content: '' }
+            }
+            messages.value[msgIndex].content += data.content
+          } else if (data.type === 'done') {
+            loading.value = false
+          }
+          await scrollToBottom()
+        } catch {}
+      }
     }
   } catch {
     ElMessage.error('请求失败，请检查后端服务是否启动')
+    messages.value.splice(msgIndex, 1)
   } finally {
     loading.value = false
     await scrollToBottom()
