@@ -8,7 +8,7 @@ class ChatRequest(BaseModel):
     message: str
 
 @router.post("/query")
-def query(request: ChatRequest):
+async def query(request: ChatRequest):
     user_input = request.message.strip()
     
     if not user_input:
@@ -17,7 +17,7 @@ def query(request: ChatRequest):
     intent = detect_intent(user_input)
     
     if intent == "compliance":
-        result = check_compliance(user_input)
+        result = await check_compliance(user_input)
         return {
             "type": "compliance",
             "results": result["results"],

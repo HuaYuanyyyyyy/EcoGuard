@@ -1,3 +1,4 @@
+import asyncio
 import json
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
@@ -39,47 +40,61 @@ def parse_pollution_data(user_input: str) -> list:
     result = json.loads(response.content)
     return result.get("items", [])
 
+# 单个污染物检测（抽出来方便并发）
+async def check_single_item(item: dict, chroma) -> dict:
+    docs = chroma.similarity_search(
+        f"{item['name']}排放标准限值",
+        k=3
+    )
+    context = "\n".join([doc.page_content for doc in docs])
+    source_files = list(set([
+        doc.metadata.get("file_name", "未知文件")
+        for doc in docs
+    ]))
+
+    template = PromptTemplate.from_template(COMPLIANCE_PROMPT)
+    prompt = template.format(
+        context=context,
+        name=item["name"],
+        measured_value=item["measured_value"]
+    )
+
+    response = await llm.ainvoke([HumanMessage(content=prompt)])
+    content = response.content.strip()
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        retry_response = await llm.ainvoke([HumanMessage(
+            content=f"以下JSON格式有错误，请修复后重新输出，只输出JSON不要其他内容，字符串内部不要用双引号：\n{content}"
+        )])
+        result = json.loads(retry_response.content.strip())
+
+    result["source_files"] = source_files
+    return result
+
+
 # 检测合规性
-def check_compliance(user_input: str) -> dict:
+async def check_compliance(user_input: str) -> dict:
     chroma = get_chroma()
     items = parse_pollution_data(user_input)
-    results = []
 
-    for item in items:
-        docs = chroma.similarity_search(
-            f"{item['name']}排放标准限值",
-            k=3
-        )
-        context = "\n".join([doc.page_content for doc in docs])
-        source_files = list(set([
-            doc.metadata.get("file_name", "未知文件")
-            for doc in docs
-        ]))
-
-        template = PromptTemplate.from_template(COMPLIANCE_PROMPT)
-        prompt = template.format(
-            context=context,
-            name=item["name"],
-            measured_value=item["measured_value"]
-        )
-        response = llm.invoke([HumanMessage(content=prompt)])
-        print("LLM111返回内容：", response.content)  # 加这行
-        result = json.loads(response.content)
-        result["source_files"] = source_files
-        results.append(result)
+    # 并发调用，所有污染物同时检测
+    results = await asyncio.gather(*[
+        check_single_item(item, chroma) for item in items
+    ])
+    results = list(results)
 
     # 自然语言总结
     template = PromptTemplate.from_template(SUMMARY_PROMPT)
     prompt = template.format(
         results=json.dumps(results, ensure_ascii=False)
     )
-    summary = llm.invoke([HumanMessage(content=prompt)]).content
+    summary_response = await llm.ainvoke([HumanMessage(content=prompt)])
 
     return {
         "results": results,
-        "summary": summary
+        "summary": summary_response.content
     }
-
 # 正常聊天
 def normal_chat(user_input: str) -> str:
     response = llm.invoke([
