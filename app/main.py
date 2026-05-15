@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
 from app.database import init_db
 from app.api.file import router as file_router
 from app.api.chat import router as chat_router
@@ -10,7 +11,7 @@ app = FastAPI(title="EcoGuard", description="环保合规智能审查系统")
 # 跨域配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.allowed_origins.split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

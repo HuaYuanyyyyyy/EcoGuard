@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str
     CHROMA_DIR: str
     DATABASE_URL: str
+    allowed_origins: str = "http://localhost:5173"
 
     class Config:
         env_file = ".env"
