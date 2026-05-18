@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     CHROMA_DIR: str
     DATABASE_URL: str
     allowed_origins: str = "http://localhost:5173"
+    COHERE_KEY: str
 
     class Config:
         env_file = ".env"
