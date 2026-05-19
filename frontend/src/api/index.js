@@ -1,7 +1,16 @@
 import axios from 'axios'
 
+
+const getBaseURL = () => {
+  const host = window.location.hostname
+  if (host === 'localhost') {
+    return 'http://localhost:8000'
+  }
+  return import.meta.env.VITE_API_BACKEND
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
+  baseURL: getBaseURL(),
   timeout: 120000
 })
 
