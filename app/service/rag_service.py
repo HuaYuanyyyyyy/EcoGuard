@@ -4,6 +4,7 @@ import time
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import SystemMessage, HumanMessage
+from app.core.hybrid_search import hybrid_search
 from app.prompts.parse import PARSE_PROMPT
 from app.core.chroma import get_chroma
 from app.config import settings
@@ -58,15 +59,19 @@ def parse_input(user_input: str) -> dict:
 
 # 单个污染物检测（抽出来方便并发）
 async def check_single_item(item: dict, chroma) -> dict:
-    docs = chroma.similarity_search(
-        f"{item['name']}排放标准限值",
-        k=3
-    )
-    context = "\n".join([doc.page_content for doc in docs])
-    source_files = list(set([
-        doc.metadata.get("file_name", "未知文件")
-        for doc in docs
-    ]))
+    # docs = chroma.similarity_search(
+    #     f"{item['name']}排放标准限值",
+    #     k=3
+    # )
+    # 换成混合检索
+    doc_contents = hybrid_search(f"{item['name']}排放标准限值", top_k=3)
+    context = "\n".join(doc_contents)
+    # source_files = list(set([
+    #     doc.metadata.get("file_name", "未知文件")
+    #     for doc in docs
+    # ]))
+    # source_files 混合检索暂时取不到 metadata，先用固定值
+    source_files = ["标准文档"]
 
     template = PromptTemplate.from_template(COMPLIANCE_PROMPT)
     prompt = template.format(
