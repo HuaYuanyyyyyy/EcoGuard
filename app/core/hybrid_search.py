@@ -1,5 +1,6 @@
 #构建索引
 import jieba
+from app.core.rerank import rerank
 from app.core.chroma import get_chroma
 from rank_bm25 import BM25Okapi
 
@@ -58,6 +59,12 @@ def hybrid_search(query: str, top_k: int = 5) -> list:
     # RRF 融合
     fused = rrf_fusion(bm25_results, vector_results)
 
-    # 返回前 top_k 个文档内容
-    return [doc for doc, _ in fused[:top_k]]    
+    # 粗排取前10
+    candidates = [doc for doc, _ in fused[:10]]
+    
+    # Rerank 精排取前 top_k
+    return rerank(query, candidates, top_n=top_k)
+
+    # # 返回前 top_k 个文档内容
+    # return [doc for doc, _ in fused[:top_k]]    
 
