@@ -46,6 +46,25 @@ def rrf_fusion(bm25_results: list, vector_results: list, k: int = 60) -> list:
 
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
+# 按文件名定向检索（用于 MHTML 已知参照标准文件的场景）
+def hybrid_search_by_filename(query: str, file_name: str, top_k: int = 5) -> list:
+    """Vector-only search restricted to a specific PDF by file_name metadata."""
+    chroma = get_chroma()
+    try:
+        vector_docs = chroma.similarity_search_with_score(
+            query,
+            k=top_k,
+            filter={"file_name": file_name},
+        )
+        results = [doc.page_content for doc, _ in vector_docs]
+        if results:
+            return results
+    except Exception:
+        pass
+    # Fall back to global hybrid search when filter returns nothing
+    return hybrid_search(query, top_k=top_k)
+
+
 # 混合检索入口
 def hybrid_search(query: str, top_k: int = 5) -> list:
     # 向量检索

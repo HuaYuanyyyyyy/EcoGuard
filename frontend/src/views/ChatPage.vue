@@ -43,7 +43,35 @@
           <div class="msg-content">{{ msg.content }}</div>
         </div>
 
-        <!-- AI消息 - 合规检测结果 -->
+        <!-- AI消息 - MHTML 加载中 -->
+        <div v-else-if="msg.type === 'mhtml-loading'" class="message ai-message">
+          <div class="msg-avatar">🛡️</div>
+          <div class="mhtml-loading-box">
+            <div class="mhtml-step" :class="{ active: msg.step >= 1, done: msg.step > 1 }">
+              <span class="step-icon">{{ msg.step > 1 ? '✓' : '⟳' }}</span>
+              <span>上传文件</span>
+            </div>
+            <div class="mhtml-step" :class="{ active: msg.step >= 2, done: msg.step > 2 }">
+              <span class="step-icon">{{ msg.step > 2 ? '✓' : msg.step === 2 ? '⟳' : '○' }}</span>
+              <span>解析污染物数据</span>
+            </div>
+            <div class="mhtml-step" :class="{ active: msg.step >= 3 }">
+              <span class="step-icon">{{ msg.step === 3 ? '⟳' : '○' }}</span>
+              <span>检索标准库并判断合规性</span>
+            </div>
+            <p class="mhtml-hint">{{ msg.statusText }}</p>
+          </div>
+        </div>
+
+        <!-- AI消息 - 错误 -->
+        <div v-else-if="msg.type === 'error'" class="message ai-message">
+          <div class="msg-avatar">🛡️</div>
+          <div class="error-box">
+            <span class="error-icon">⚠️</span>
+            <span>{{ msg.content }}</span>
+          </div>
+        </div>
+
         <div v-else-if="msg.type === 'compliance'" class="message ai-message compliance-msg">
           <div class="msg-avatar">🛡️</div>
           <div class="compliance-content">
@@ -113,7 +141,24 @@
         @keydown.ctrl.enter="sendMessage"
       />
       <div class="input-footer">
-        <span class="input-tip">Ctrl + Enter 发送</span>
+        <div class="input-left">
+          <input
+            ref="mhtmlInput"
+            type="file"
+            accept=".mhtml"
+            style="display: none"
+            @change="uploadMhtml"
+          />
+          <el-button
+            size="small"
+            :loading="mhtmlLoading"
+            :disabled="loading"
+            @click="$refs.mhtmlInput.click()"
+          >
+            📎 上传 MHTML
+          </el-button>
+          <span class="input-tip">Ctrl + Enter 发送</span>
+        </div>
         <el-button
           type="primary"
           @click="sendMessage"
@@ -135,7 +180,9 @@ import { chatApi } from '../api/index'
 const messages = ref([])
 const inputText = ref('')
 const loading = ref(false)
+const mhtmlLoading = ref(false)
 const messageArea = ref(null)
+const mhtmlInput = ref(null)
 
 const fillExample = () => {
   inputText.value = '灰尘 2.0mg/m3\n二氧化硫 3.2mg/m3\n二氧化氮 4.2mg/m3'
@@ -145,6 +192,109 @@ const scrollToBottom = async () => {
   await nextTick()
   if (messageArea.value) {
     messageArea.value.scrollTop = messageArea.value.scrollHeight
+  }
+}
+
+const uploadMhtml = async (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+  event.target.value = ''
+
+  mhtmlLoading.value = true
+
+  messages.value.push({ role: 'user', content: `📎 ${file.name}` })
+  // 加载中占位消息
+  messages.value.push({
+    role: 'ai',
+    type: 'mhtml-loading',
+    step: 1,
+    statusText: '正在上传文件...'
+  })
+  const msgIndex = messages.value.length - 1
+  await scrollToBottom()
+
+  const setStep = (step, text) => {
+    if (messages.value[msgIndex]?.type === 'mhtml-loading') {
+      messages.value[msgIndex].step = step
+      messages.value[msgIndex].statusText = text
+    }
+  }
+
+  const showError = (text) => {
+    messages.value[msgIndex] = { role: 'ai', type: 'error', content: text }
+    mhtmlLoading.value = false
+  }
+
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const response = await fetch(`${baseURL}/chat/check-mhtml`, {
+      method: 'POST',
+      body: formData,
+    })
+
+    // HTTP 层报错（400/500 等），读取 JSON 错误信息
+    if (!response.ok) {
+      let errMsg = `请求失败（${response.status}）`
+      try {
+        const errJson = await response.json()
+        errMsg = errJson.detail || errJson.content || errMsg
+      } catch {}
+      showError(errMsg)
+      return
+    }
+
+    setStep(2, '正在解析文件中的污染物数据...')
+    await scrollToBottom()
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let gotFirstResult = false
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value)
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+
+          if (data.type === 'error') {
+            showError(data.content)
+            return
+          }
+
+          if (data.type === 'result_item') {
+            if (!gotFirstResult) {
+              gotFirstResult = true
+              setStep(3, '正在逐项检测合规性...')
+              // 切换为合规结果消息
+              messages.value[msgIndex] = { role: 'ai', type: 'compliance', results: [], summary: '' }
+            }
+            messages.value[msgIndex].results.push(data.item)
+          } else if (data.type === 'summary_chunk') {
+            messages.value[msgIndex].summary += data.content
+          } else if (data.type === 'done') {
+            mhtmlLoading.value = false
+          }
+          await scrollToBottom()
+        } catch {}
+      }
+    }
+
+    // 若流结束但一条结果都没有（文件内容无法提取）
+    if (!gotFirstResult) {
+      showError('未从文件中提取到有效的污染物数据，请确认文件格式')
+    }
+  } catch (err) {
+    showError('网络错误，请检查后端服务是否启动：' + (err.message || ''))
+  } finally {
+    mhtmlLoading.value = false
+    await scrollToBottom()
   }
 }
 
@@ -415,6 +565,88 @@ const sendMessage = async () => {
   justify-content: space-between;
   align-items: center;
   margin-top: 10px;
+}
+
+.input-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* MHTML 加载步骤气泡 */
+.mhtml-loading-box {
+  background: white;
+  border-radius: 12px;
+  padding: 16px 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 260px;
+}
+
+.mhtml-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #bbb;
+  transition: color 0.3s;
+}
+
+.mhtml-step.active {
+  color: #2E7D32;
+  font-weight: 600;
+}
+
+.mhtml-step.done {
+  color: #81C784;
+}
+
+.step-icon {
+  font-size: 15px;
+  width: 18px;
+  text-align: center;
+}
+
+.mhtml-step.active .step-icon {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+
+.mhtml-step.done .step-icon {
+  animation: none;
+}
+
+.mhtml-hint {
+  font-size: 12px;
+  color: #aaa;
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* 错误气泡 */
+.error-box {
+  background: #FFF3F3;
+  border: 1px solid #FFCDD2;
+  border-radius: 12px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: #C62828;
+  max-width: 500px;
+}
+
+.error-icon {
+  font-size: 18px;
+  flex-shrink: 0;
 }
 
 .input-tip {

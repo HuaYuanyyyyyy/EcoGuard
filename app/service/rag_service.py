@@ -1,10 +1,11 @@
 import asyncio
 import json
+import re
 import time
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import SystemMessage, HumanMessage
-from app.core.hybrid_search import hybrid_search
+from app.core.hybrid_search import hybrid_search, hybrid_search_by_filename
 from app.prompts.parse import PARSE_PROMPT
 from app.core.chroma import get_chroma
 from app.config import settings
@@ -51,10 +52,13 @@ def parse_input(user_input: str) -> dict:
     try:
         result = json.loads(content)
     except json.JSONDecodeError:
-        retry_response = llm.invoke([HumanMessage(
-            content=f"以下JSON格式有错误，请修复后重新输出，只输出JSON不要其他内容：\n{content}"
-        )])
-        result = json.loads(retry_response.content.strip())
+        try:
+            retry_response = llm.invoke([HumanMessage(
+                content=f"以下JSON格式有错误，请修复后重新输出，只输出JSON不要其他内容：\n{content}"
+            )])
+            result = json.loads(retry_response.content.strip())
+        except (json.JSONDecodeError, Exception):
+            result = {"intent": "chat", "items": []}
     return result
 
 # 单个污染物检测（抽出来方便并发）
@@ -85,10 +89,19 @@ async def check_single_item(item: dict, chroma) -> dict:
     try:
         result = json.loads(content)
     except json.JSONDecodeError:
-        retry_response = await llm.ainvoke([HumanMessage(
-            content=f"以下JSON格式有错误，请修复后重新输出，只输出JSON不要其他内容，字符串内部不要用双引号：\n{content}"
-        )])
-        result = json.loads(retry_response.content.strip())
+        try:
+            retry_response = await llm.ainvoke([HumanMessage(
+                content=f"以下JSON格式有错误，请修复后重新输出，只输出JSON不要其他内容，字符串内部不要用双引号：\n{content}"
+            )])
+            result = json.loads(retry_response.content.strip())
+        except (json.JSONDecodeError, Exception):
+            result = {
+                "name": item["name"],
+                "measured_value": item["measured_value"],
+                "standard_value": "未知",
+                "is_compliant": None,
+                "reason": "LLM返回格式异常，无法解析结果",
+            }
 
     result["source_files"] = source_files
     return result
@@ -162,4 +175,112 @@ async def stream_normal_chat(user_input: str) -> AsyncGenerator[str, None]:
         if chunk.content:
             yield f"data: {json.dumps({'type': 'chat_chunk', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
-    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"    
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+
+# ── MHTML 合规检测 ─────────────────────────────────────────────────────────────
+
+def _find_matching_file(standard_name: str, db):
+    """Fuzzy-match a standard name from MHTML to an uploaded PDF file."""
+    from app.model.file import File
+
+    files = db.query(File).filter(File.status == "active").all()
+    if not files:
+        return None
+
+    def normalize(s: str) -> str:
+        return re.sub(r"[\s\-\.]", "", s).upper()
+
+    std_norm = normalize(standard_name)
+    # Extract GB standard code, e.g. "GB31573" from "GB 31573-2015"
+    gb_codes = set(re.findall(r"GB\d+", std_norm))
+
+    best_file = None
+    best_score = 0.0
+
+    for f in files:
+        fn_norm = normalize(f.file_name)
+        fn_no_ext = re.sub(r"\.PDF$", "", fn_norm)
+
+        # GB code match is highest-confidence
+        file_gb = set(re.findall(r"GB\d+", fn_norm))
+        if gb_codes and file_gb and gb_codes & file_gb:
+            score = 1.0
+        elif std_norm in fn_no_ext or fn_no_ext in std_norm:
+            score = min(len(std_norm), len(fn_no_ext)) / max(len(std_norm), len(fn_no_ext), 1)
+        else:
+            continue
+
+        if score > best_score:
+            best_score = score
+            best_file = f
+
+    return best_file
+
+
+async def _check_mhtml_item(item: dict, db, chroma) -> dict:
+    """Compliance check for one MHTML row using its referenced standard file."""
+    standard_name = item.get("standard_file", "")
+    matched_file = _find_matching_file(standard_name, db)
+
+    if matched_file:
+        doc_contents = hybrid_search_by_filename(
+            f"{item['name']}排放标准限值",
+            matched_file.file_name,
+            top_k=3,
+        )
+        source_files = [matched_file.file_name]
+    else:
+        doc_contents = hybrid_search(f"{item['name']}排放标准限值", top_k=3)
+        source_files = [standard_name or "标准文档"]
+
+    context = "\n".join(doc_contents)
+    template = PromptTemplate.from_template(COMPLIANCE_PROMPT)
+    prompt = template.format(
+        context=context,
+        name=item["name"],
+        measured_value=item["measured_value"],
+    )
+
+    response = await llm.ainvoke([HumanMessage(content=prompt)])
+    content = response.content.strip()
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        try:
+            retry = await llm.ainvoke([HumanMessage(
+                content=f"以下JSON格式有错误，请修复后重新输出，只输出JSON不要其他内容：\n{content}"
+            )])
+            result = json.loads(retry.content.strip())
+        except (json.JSONDecodeError, Exception):
+            result = {
+                "name": item["name"],
+                "measured_value": item["measured_value"],
+                "standard_value": "未知",
+                "is_compliant": None,
+                "reason": "LLM返回格式异常，无法解析结果",
+            }
+
+    result["source_files"] = source_files
+    return result
+
+
+async def stream_check_mhtml(items: list, db) -> AsyncGenerator[str, None]:
+    """Stream compliance results for a list of items parsed from an MHTML file."""
+    chroma = get_chroma()
+    results = []
+
+    tasks = [_check_mhtml_item(item, db, chroma) for item in items]
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        results.append(result)
+        yield f"data: {json.dumps({'type': 'result_item', 'item': result}, ensure_ascii=False)}\n\n"
+
+    template = PromptTemplate.from_template(SUMMARY_PROMPT)
+    prompt = template.format(results=json.dumps(results, ensure_ascii=False))
+
+    async for chunk in llm.astream([HumanMessage(content=prompt)]):
+        if chunk.content:
+            yield f"data: {json.dumps({'type': 'summary_chunk', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"

@@ -9,7 +9,18 @@
       <el-button type="primary" @click="triggerUpload" :loading="uploading">
         <span>⬆️ 上传文档</span>
       </el-button>
-      <input ref="fileInput" type="file" accept=".pdf" style="display:none" @change="handleUpload" />
+      <input ref="fileInput" type="file" accept=".pdf" multiple style="display:none" @change="handleUpload" />
+    </div>
+
+    <!-- 上传进度列表 -->
+    <div v-if="uploadQueue.length > 0" class="upload-queue">
+      <div v-for="item in uploadQueue" :key="item.name" class="upload-item">
+        <span class="upload-name">{{ item.name }}</span>
+        <el-tag v-if="item.status === 'pending'" type="info" size="small">等待中</el-tag>
+        <el-tag v-else-if="item.status === 'uploading'" type="warning" size="small">上传中...</el-tag>
+        <el-tag v-else-if="item.status === 'done'" type="success" size="small">✓ 完成</el-tag>
+        <el-tag v-else type="danger" size="small" :title="item.error">✗ 失败</el-tag>
+      </div>
     </div>
 
     <!-- 搜索栏 -->
@@ -81,6 +92,7 @@ const deleting = ref(false)
 const fileInput = ref(null)
 const deleteDialogVisible = ref(false)
 const deleteTarget = ref(null)
+const uploadQueue = ref([])
 
 // 过滤文件列表
 const filteredFiles = computed(() =>
@@ -102,22 +114,46 @@ const loadFiles = async () => {
 // 触发文件选择
 const triggerUpload = () => fileInput.value.click()
 
-// 上传文件
+// 上传文件（支持多选）
 const handleUpload = async (e) => {
-  const file = e.target.files[0]
-  if (!file) return
+  const selected = Array.from(e.target.files)
+  if (!selected.length) return
+  fileInput.value.value = ''
+
+  // 初始化进度队列
+  uploadQueue.value = selected.map(f => ({ name: f.name, status: 'pending', error: '' }))
   uploading.value = true
+
+  const formData = new FormData()
+  selected.forEach(f => formData.append('files', f))
+
   try {
-    const formData = new FormData()
-    formData.append('file', file)
-    await fileApi.upload(formData)
-    ElMessage.success('上传成功，正在处理文档...')
+    // 逐个标记 uploading 状态（视觉反馈）
+    uploadQueue.value.forEach(item => { item.status = 'uploading' })
+
+    const res = await fileApi.upload(formData)
+    const results = res.data
+
+    results.forEach((r, i) => {
+      if (uploadQueue.value[i]) {
+        uploadQueue.value[i].status = r.success ? 'done' : 'error'
+        uploadQueue.value[i].error = r.error || ''
+      }
+    })
+
+    const successCount = results.filter(r => r.success).length
+    const failCount = results.length - successCount
+    if (successCount > 0) ElMessage.success(`成功上传 ${successCount} 个文件`)
+    if (failCount > 0) ElMessage.warning(`${failCount} 个文件上传失败`)
+
     await loadFiles()
   } catch (err) {
+    uploadQueue.value.forEach(item => { item.status = 'error' })
     ElMessage.error(err.response?.data?.detail || '上传失败')
   } finally {
     uploading.value = false
-    fileInput.value.value = ''
+    // 3 秒后自动清除进度列表
+    setTimeout(() => { uploadQueue.value = [] }, 3000)
   }
 }
 
@@ -252,5 +288,31 @@ onMounted(loadFiles)
 
 .divider {
   color: #ddd;
+}
+
+.upload-queue {
+  background: #F9FBE7;
+  border: 1px solid #DCE775;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.upload-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.upload-name {
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 75%;
 }
 </style>
