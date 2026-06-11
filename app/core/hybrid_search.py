@@ -1,4 +1,5 @@
 #构建索引
+import threading
 import jieba
 from app.core.rerank import rerank
 from app.core.chroma import get_chroma
@@ -7,22 +8,38 @@ from rank_bm25 import BM25Okapi
 
 _bm25 = None
 _docs = None
+_built = False  # 区分「未构建」和「构建过但库是空的」，空库时不能每次检索都重建
+_lock = threading.Lock()
 
 # 索引构建
 def _build_bm25():
-    global _bm25, _docs
+    global _bm25, _docs, _built
     chroma = get_chroma()
     raw = chroma.get()
-    _docs = raw.get("documents")
-    if not _docs:
-        return
-    tokenized = [list(jieba.cut(doc)) for doc in _docs]
-    _bm25 = BM25Okapi(tokenized)
+    docs = raw.get("documents")
+    if docs:
+        tokenized = [list(jieba.cut(doc)) for doc in docs]
+        _bm25 = BM25Okapi(tokenized)
+        _docs = docs
+    else:
+        _bm25 = None
+        _docs = []
+    _built = True
+
+def invalidate_bm25():
+    """上传/删除文件后调用，标记索引失效，下次检索时惰性重建。"""
+    global _bm25, _docs, _built
+    with _lock:
+        _bm25 = None
+        _docs = None
+        _built = False
 
 def get_bm25():
-    global _bm25, _docs
-    if _bm25 is None:
-        _build_bm25()
+    if not _built:
+        with _lock:
+            # double-check：等锁期间可能已被其他请求构建完
+            if not _built:
+                _build_bm25()
     return _bm25, _docs
 
 # BM25检索

@@ -6,6 +6,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.model.file import File
 from app.service.minio_service import upload_file, delete_file
 from app.core.chroma import get_chroma
+from app.core.hybrid_search import invalidate_bm25
 import tempfile
 import os
 
@@ -66,6 +67,7 @@ def upload_pdf(file_name: str, file_data: bytes, db: Session):
         db.add(file_record)
         db.commit()
 
+        invalidate_bm25()
         return file_record
 
     except Exception as e:
@@ -81,6 +83,8 @@ def upload_pdf(file_name: str, file_data: bytes, db: Session):
                 chroma.delete(ids=chroma_ids)
             except:
                 pass
+            # 回滚前若有查询触发了重建，索引里会混入已回滚的 chunk，再失效一次
+            invalidate_bm25()
         db.rollback()
         raise e
 
@@ -99,6 +103,7 @@ def delete_pdf(file_id: str, db: Session):
     results = chroma.get(where={"file_id": file_id})
     if results["ids"]:
         chroma.delete(ids=results["ids"])
+        invalidate_bm25()
 
     # 4. 删MySQL
     db.delete(file_record)
