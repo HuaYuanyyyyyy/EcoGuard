@@ -5,37 +5,60 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.service.rag_service import parse_input, stream_check_compliance, stream_normal_chat, stream_check_mhtml
 from app.service.mhtml_service import parse_mhtml
+from app.service.history_service import (
+    get_history, save_message, format_history,
+    list_sessions, get_session_messages,
+)
 from app.database import get_db
 
 router = APIRouter(prefix="/chat", tags=["问答"])
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str | None = None
 
 @router.post("/query")
 async def query(request: ChatRequest):
     user_input = request.message.strip()
+    session_id = request.session_id
 
     if not user_input:
         return {"type": "error", "content": "输入不能为空"}
 
+    # 先取历史再存本轮输入，避免当前消息混进历史
+    history = get_history(session_id)
+
     t1 = time.time()
-    parsed = parse_input(user_input)
+    parsed = parse_input(user_input, format_history(history))
     print(f"[阶段1] 解析耗时: {time.time() - t1:.2f}s")
+
+    save_message(session_id, "user", user_input)
 
     intent = parsed.get("intent")
     items = parsed.get("items", [])
 
     if intent == "compliance" and items:
         return StreamingResponse(
-            stream_check_compliance(user_input, items),
+            stream_check_compliance(user_input, items, session_id=session_id),
             media_type="text/event-stream"
         )
     else:
         return StreamingResponse(
-            stream_normal_chat(user_input),
+            stream_normal_chat(user_input, history=history, session_id=session_id),
             media_type="text/event-stream"
         )
+
+
+@router.get("/sessions")
+def get_sessions():
+    """会话列表，按最近活跃排序。"""
+    return list_sessions()
+
+
+@router.get("/sessions/{session_id}/messages")
+def get_messages(session_id: str):
+    """某个会话的完整消息，用于前端回显。"""
+    return get_session_messages(session_id)
 
 
 @router.post("/debug-mhtml")

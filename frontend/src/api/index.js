@@ -23,5 +23,7 @@ export const fileApi = {
 }
 
 export const chatApi = {
-  query: (message) => api.post('/chat/query', { message })
+  query: (message) => api.post('/chat/query', { message }),
+  sessions: () => api.get('/chat/sessions'),
+  sessionMessages: (sessionId) => api.get(`/chat/sessions/${sessionId}/messages`)
 }

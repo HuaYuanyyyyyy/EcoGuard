@@ -1,5 +1,26 @@
 <template>
   <div class="chat-page">
+    <!-- 会话列表侧边栏 -->
+    <div class="session-sidebar">
+      <el-button class="new-session-btn" type="primary" plain @click="newSession">
+        ＋ 新会话
+      </el-button>
+      <div class="session-list">
+        <div
+          v-for="s in sessions"
+          :key="s.session_id"
+          class="session-item"
+          :class="{ active: s.session_id === sessionId }"
+          @click="switchSession(s.session_id)"
+        >
+          <div class="session-title">{{ s.title }}</div>
+          <div class="session-time">{{ formatTime(s.updated_at) }}</div>
+        </div>
+        <div v-if="sessions.length === 0" class="session-empty">暂无历史会话</div>
+      </div>
+    </div>
+
+    <div class="chat-main">
     <!-- 顶部标题 -->
     <div class="page-header">
       <div class="header-left">
@@ -169,13 +190,19 @@
         </el-button>
       </div>
     </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, nextTick, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '../api/index'
+
+// 当前会话 ID 持久化到 localStorage，刷新页面接着聊；侧边栏可切换/新建
+const sessionId = ref(localStorage.getItem('ecoguard_session_id') || crypto.randomUUID())
+localStorage.setItem('ecoguard_session_id', sessionId.value)
+const sessions = ref([])
 
 const messages = ref([])
 const inputText = ref('')
@@ -187,6 +214,60 @@ const mhtmlInput = ref(null)
 const fillExample = () => {
   inputText.value = '灰尘 2.0mg/m3\n二氧化硫 3.2mg/m3\n二氧化氮 4.2mg/m3'
 }
+
+const formatTime = (t) => (t ? t.slice(5, 16).replace('T', ' ') : '')
+
+const loadSessions = async () => {
+  try {
+    sessions.value = (await chatApi.sessions()).data
+  } catch {}
+}
+
+// 把库里的消息还原成页面消息：合规结果有 raw JSON 就还原表格，否则按文本气泡
+const restoreMessages = (rows) =>
+  rows.map((m) => {
+    if (m.role === 'user') return { role: 'user', content: m.content }
+    if (m.raw) {
+      try {
+        const parsed = JSON.parse(m.raw)
+        return {
+          role: 'ai',
+          type: 'compliance',
+          results: parsed.results || [],
+          summary: parsed.summary || ''
+        }
+      } catch {}
+    }
+    return { role: 'ai', type: 'chat', content: m.content }
+  })
+
+const switchSession = async (id) => {
+  if (loading.value || mhtmlLoading.value) return
+  sessionId.value = id
+  localStorage.setItem('ecoguard_session_id', id)
+  try {
+    const { data } = await chatApi.sessionMessages(id)
+    messages.value = restoreMessages(data)
+  } catch {
+    messages.value = []
+  }
+  await scrollToBottom()
+}
+
+const newSession = () => {
+  if (loading.value || mhtmlLoading.value) return
+  sessionId.value = crypto.randomUUID()
+  localStorage.setItem('ecoguard_session_id', sessionId.value)
+  messages.value = []
+}
+
+onMounted(async () => {
+  await loadSessions()
+  // 上次的会话还在就恢复消息
+  if (sessions.value.some((s) => s.session_id === sessionId.value)) {
+    await switchSession(sessionId.value)
+  }
+})
 
 const scrollToBottom = async () => {
   await nextTick()
@@ -316,7 +397,7 @@ const sendMessage = async () => {
     const response = await fetch(`${baseURL}/chat/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify({ message: text, session_id: sessionId.value })
     })
 
     const reader = response.body.getReader()
@@ -368,6 +449,8 @@ const sendMessage = async () => {
   } finally {
     loading.value = false
     await scrollToBottom()
+    // 新会话的标题在首条消息后才生成，发完刷新列表
+    loadSessions()
   }
 }
 </script>
@@ -375,6 +458,79 @@ const sendMessage = async () => {
 <style scoped>
 .chat-page {
   height: 100%;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 会话侧边栏 */
+.session-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 28px 0 20px 24px;
+}
+
+.new-session-btn {
+  width: 100%;
+}
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.2s;
+}
+
+.session-item:hover {
+  background: #E8F5E9;
+}
+
+.session-item.active {
+  background: white;
+  border-color: #C8E6C9;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+}
+
+.session-title {
+  font-size: 13px;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-item.active .session-title {
+  color: #1B5E20;
+  font-weight: 600;
+}
+
+.session-time {
+  font-size: 11px;
+  color: #aaa;
+  margin-top: 2px;
+}
+
+.session-empty {
+  font-size: 12px;
+  color: #bbb;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.chat-main {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   padding: 28px 32px 20px;

@@ -4,8 +4,9 @@ import re
 import time
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from app.core.hybrid_search import hybrid_search, hybrid_search_by_filename
+from app.service.history_service import save_message
 from app.prompts.parse import PARSE_PROMPT
 from app.core.chroma import get_chroma
 from app.config import settings
@@ -44,9 +45,9 @@ llm = ChatOpenAI(
 #     print("LLM返回内容：", response.content)  # 加这行
 #     result = json.loads(response.content)
 #     return result.get("items", [])
-def parse_input(user_input: str) -> dict:
+def parse_input(user_input: str, history_text: str = "（无历史对话）") -> dict:
     template = PromptTemplate.from_template(PARSE_PROMPT)
-    prompt = template.format(user_input=user_input)
+    prompt = template.format(user_input=user_input, history=history_text)
     response = llm.invoke([HumanMessage(content=prompt)])
     content = response.content.strip()
     try:
@@ -140,9 +141,8 @@ def normal_chat(user_input: str) -> str:
 
 
 
-async def stream_check_compliance(user_input: str,items: list) -> AsyncGenerator[str, None]:
+async def stream_check_compliance(user_input: str, items: list, session_id: str = None) -> AsyncGenerator[str, None]:
     chroma = get_chroma()
-    # items = parse_pollution_data(user_input)
     results = []
 
     # 每个污染物检测完立刻发出，不等其他的
@@ -153,29 +153,63 @@ async def stream_check_compliance(user_input: str,items: list) -> AsyncGenerator
         results.append(result)
         # 立刻推给前端
         yield f"data: {json.dumps({'type': 'result_item', 'item': result}, ensure_ascii=False)}\n\n"
-    print(f"[阶段2] 解析耗时: {time.time() - t2:.2f}s")    
+    print(f"[阶段2] 解析耗时: {time.time() - t2:.2f}s")
     # 所有检测完后流式输出总结
     t3 = time.time()
     template = PromptTemplate.from_template(SUMMARY_PROMPT)
     prompt = template.format(results=json.dumps(results, ensure_ascii=False))
 
+    summary_text = ""
     async for chunk in llm.astream([HumanMessage(content=prompt)]):
         if chunk.content:
+            summary_text += chunk.content
             yield f"data: {json.dumps({'type': 'summary_chunk', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
 
-    print(f"[阶段3] 解析耗时: {time.time() - t3:.2f}s")  
+    print(f"[阶段3] 解析耗时: {time.time() - t3:.2f}s")
 
-async def stream_normal_chat(user_input: str) -> AsyncGenerator[str, None]:
-    async for chunk in llm.astream([
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=user_input)
-    ]):
+    # content 存压缩结论（给后续轮次当上下文），raw 存原始 JSON（给前端回显表格）
+    save_message(
+        session_id, "assistant", _compact_results(results, summary_text),
+        raw=json.dumps({"results": results, "summary": summary_text}, ensure_ascii=False),
+    )
+
+
+def _compact_results(results: list, summary_text: str) -> str:
+    lines = []
+    for r in results:
+        if r.get("is_compliant") is True:
+            status = "合规"
+        elif r.get("is_compliant") is False:
+            status = "超标"
+        else:
+            status = "未知"
+        lines.append(f"{r.get('name')} 实测{r.get('measured_value')}，标准值{r.get('standard_value')}，{status}")
+    record = "；".join(lines)
+    if summary_text:
+        record += f"\n总结：{summary_text}"
+    return record
+
+
+async def stream_normal_chat(user_input: str, history: list = None, session_id: str = None) -> AsyncGenerator[str, None]:
+    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    for m in history or []:
+        if m["role"] == "user":
+            messages.append(HumanMessage(content=m["content"]))
+        else:
+            messages.append(AIMessage(content=m["content"]))
+    messages.append(HumanMessage(content=user_input))
+
+    reply = ""
+    async for chunk in llm.astream(messages):
         if chunk.content:
+            reply += chunk.content
             yield f"data: {json.dumps({'type': 'chat_chunk', 'content': chunk.content}, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+    save_message(session_id, "assistant", reply)
 
 
 # ── MHTML 合规检测 ─────────────────────────────────────────────────────────────
